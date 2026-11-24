@@ -1,313 +1,470 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#03040c" />
-  <title>This Is Great — Particle Flow</title>
-  <style>
-    * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #03040c; }
-    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    #scene, #trails { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-    #scene { z-index: 0; touch-action: none; cursor: crosshair; }
-    #trails { z-index: 1; pointer-events: none; }
-    h1 {
-      position: fixed; z-index: 2; top: clamp(22px, 5vh, 52px); left: 0; width: 100%;
-      margin: 0; padding: 0 16px; text-align: center; pointer-events: none;
-      color: rgba(247, 245, 255, .94); font-size: clamp(18px, 3vw, 30px);
-      font-weight: 650; letter-spacing: .34em; text-indent: .34em;
-      text-shadow: 0 0 18px rgba(178, 143, 255, .35);
-    }
-    .hint {
-      position: fixed; z-index: 2; bottom: max(18px, env(safe-area-inset-bottom));
-      left: 0; width: 100%; text-align: center; pointer-events: none;
-      color: rgba(205, 199, 230, .43); font-size: 11px; letter-spacing: .12em;
-    }
-    #status {
-      position: fixed; z-index: 3; inset: auto 12px 12px 12px; display: none;
-      color: #e8ddff; background: #171326; border: 1px solid #51416f;
-      border-radius: 8px; padding: 12px; font: 13px/1.5 system-ui, sans-serif;
-    }
-  </style>
-</head>
-<body>
-  <h1>THIS IS GREAT</h1>
-  <canvas id="scene" aria-label="Interactive flowing particle animation"></canvas>
-  <canvas id="trails" aria-hidden="true"></canvas>
-  <div class="hint">MOVE YOUR POINTER OR TOUCH THE PARTICLES</div>
-  <div id="status" role="status"></div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <script type="module">
-    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
+    <title>Interactive Particle Universe</title>
 
-    (() => {
-      const canvas = document.getElementById("scene");
-      const trailCanvas = document.getElementById("trails");
-      const trailCtx = trailCanvas.getContext("2d");
-      const status = document.getElementById("status");
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #03040c;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+
+        /* Enables touch interaction without page scrolling */
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      .heading {
+        position: fixed;
+        top: 38px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+
+        color: #f5f3ff;
+        font-family: Arial, sans-serif;
+        font-size: clamp(16px, 2.5vw, 30px);
+        font-weight: 500;
+        letter-spacing: 0.32em;
+        white-space: nowrap;
+
+        text-shadow: 0 0 18px rgba(170, 150, 255, 0.5);
+        pointer-events: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1 class="heading">THIS IS GREAT</h1>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+      // ==========================================
+      // CANVAS SETUP
+      // ==========================================
+
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+
+      let width;
+      let height;
+      let dpr;
+
       const PARTICLE_COUNT = 480;
-      const particles = [];
-      const pointer = { x: 0, y: 0, active: false, vx: 0, vy: 0, last: 0 };
-      let width = 0, height = 0, pixelRatio = 1, previousTime = 0;
 
-      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-      const random = (a, b) => a + Math.random() * (b - a);
-
-      let renderer;
-      try {
-        renderer = new THREE.WebGLRenderer({
-          canvas,
-          antialias: true,
-          alpha: false,
-          powerPreference: "high-performance"
-        });
-      } catch (error) {
-        status.style.display = "block";
-        status.textContent = "WebGL is unavailable in this browser. Try an updated version of Chrome, Edge, or Firefox with hardware acceleration enabled.";
-        return;
-      }
-
-      renderer.setClearColor(0x03040c, 1);
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-      const scene = new THREE.Scene();
-      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
-      camera.position.z = 2;
-
-      // The particle positions are updated on the CPU; GLSL handles their glow,
-      // soft edges, colour and per-particle brightness on the GPU.
-      const vertexShader = `
-        attribute float aSize;
-        attribute float aAlpha;
-        attribute vec3 aColor;
-        attribute float aPhase;
-        uniform float uPixelRatio;
-        uniform float uTime;
-        varying vec3 vColor;
-        varying float vAlpha;
-        varying float vTwinkle;
-        void main() {
-          vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_Position = projectionMatrix * viewPosition;
-          gl_PointSize = aSize * 7.0 * uPixelRatio;
-          vColor = aColor;
-          vAlpha = aAlpha;
-          vTwinkle = 0.82 + 0.18 * sin(uTime * 1.8 + aPhase);
-        }
-      `;
-
-      const fragmentShader = `
-        varying vec3 vColor;
-        varying float vAlpha;
-        varying float vTwinkle;
-        void main() {
-          vec2 point = gl_PointCoord - vec2(0.5);
-          float d = length(point);
-          float halo = 1.0 - smoothstep(0.05, 0.5, d);
-          float core = 1.0 - smoothstep(0.02, 0.17, d);
-          float glow = halo * 0.22 + core * 0.95;
-          if (glow < 0.008) discard;
-          gl_FragColor = vec4(vColor * (0.72 + core * 0.55), glow * vAlpha * vTwinkle);
-        }
-      `;
-
-      const positions = new Float32Array(PARTICLE_COUNT * 3);
-      const sizes = new Float32Array(PARTICLE_COUNT);
-      const alphas = new Float32Array(PARTICLE_COUNT);
-      const colors = new Float32Array(PARTICLE_COUNT * 3);
-      const phases = new Float32Array(PARTICLE_COUNT);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
-      geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-      geometry.setAttribute("aAlpha", new THREE.BufferAttribute(alphas, 1));
-      geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-      geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
-
-      const uniforms = {
-        uPixelRatio: { value: 1 },
-        uTime: { value: 0 }
+      const CONFIG = {
+        interactionRadius: 210,
+        dispersion: 1.8,
+        mouseFollow: 0.15,
+        returnForce: 0.008,
+        friction: 0.91,
+        glow: 8,
+        pathWidth: 0.15,
+        flowSpeed: 0.0003,
       };
-      const material = new THREE.ShaderMaterial({
-        uniforms,
-        vertexShader,
-        fragmentShader,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending
-      });
-      const pointCloud = new THREE.Points(geometry, material);
-      pointCloud.frustumCulled = false;
-      scene.add(pointCloud);
 
-      // A cubic Bezier curve gives the same flowing S-shaped path as the original.
-      function pathPoint(t) {
-        const x0 = width * 0.10, x1 = width * 0.90;
-        const y0 = height * 0.30, y1 = height * 0.72;
-        const bend = Math.min(height * 0.27, width * 0.20);
-        const p0 = { x: x0, y: y0 };
-        const p1 = { x: width * 0.82, y: y0 - bend };
-        const p2 = { x: width * 0.18, y: y1 + bend };
-        const p3 = { x: x1, y: y1 };
-        const u = 1 - t;
-        return {
-          x: u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x,
-          y: u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y
-        };
-      }
+      let particles = [];
+      let animationTime = 0;
 
-      function createParticle(i) {
-        const t = i / PARTICLE_COUNT;
-        const p = pathPoint(t);
-        const violet = Math.random() < 0.28;
-        return {
-          t,
-          speed: random(0.000055, 0.000105),
-          x: p.x + random(-10, 10),
-          y: p.y + random(-10, 10),
-          vx: 0, vy: 0,
-          size: random(0.65, 1.8),
-          alpha: random(0.45, 0.95),
-          violet,
-          phase: random(0, Math.PI * 2),
-          reverse: false
-        };
-      }
+      // ==========================================
+      // POINTER SYSTEM
+      // Works with mouse AND touchscreen
+      // ==========================================
 
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
-        const p = createParticle(i);
-        particles.push(p);
-        sizes[i] = p.size;
-        alphas[i] = p.alpha;
-        phases[i] = p.phase;
-        const c = p.violet ? [0.745, 0.592, 1.0] : [0.92, 0.94, 1.0];
-        colors.set(c, i * 3);
-      }
+      const pointer = {
+        x: -1000,
+        y: -1000,
 
-      function resize() {
-        width = window.innerWidth;
-        height = window.innerHeight;
-        pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-        renderer.setPixelRatio(pixelRatio);
-        renderer.setSize(width, height, false);
-        trailCanvas.width = Math.round(width * pixelRatio);
-        trailCanvas.height = Math.round(height * pixelRatio);
-        trailCanvas.style.width = width + "px";
-        trailCanvas.style.height = height + "px";
-        trailCtx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-        camera.left = -width / 2;
-        camera.right = width / 2;
-        camera.top = height / 2;
-        camera.bottom = -height / 2;
-        camera.updateProjectionMatrix();
-        uniforms.uPixelRatio.value = pixelRatio;
-        for (const p of particles) {
-          const target = pathPoint(p.t);
-          p.x = target.x;
-          p.y = target.y;
-          p.vx = 0;
-          p.vy = 0;
+        lastX: null,
+        lastY: null,
+
+        vx: 0,
+        vy: 0,
+
+        energy: 0,
+        active: false,
+
+        pointerId: null,
+      };
+
+      // Update pointer position
+      function updatePointer(e) {
+        const rect = canvas.getBoundingClientRect();
+
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // Calculate pointer velocity
+        if (pointer.lastX !== null && pointer.lastY !== null) {
+          pointer.vx = pointer.vx * 0.45 + (x - pointer.lastX) * 0.55;
+
+          pointer.vy = pointer.vy * 0.45 + (y - pointer.lastY) * 0.55;
+
+          pointer.vx = Math.max(-28, Math.min(28, pointer.vx));
+          pointer.vy = Math.max(-28, Math.min(28, pointer.vy));
         }
-      }
 
-      function setPointer(e) {
-        const now = performance.now();
-        const dt = Math.max(8, now - pointer.last);
-        const x = e.clientX, y = e.clientY;
-        pointer.vx = clamp((x - pointer.x) / dt, -2.5, 2.5);
-        pointer.vy = clamp((y - pointer.y) / dt, -2.5, 2.5);
         pointer.x = x;
         pointer.y = y;
-        pointer.last = now;
+
+        pointer.lastX = x;
+        pointer.lastY = y;
+
+        pointer.energy = 1;
         pointer.active = true;
       }
 
-      canvas.addEventListener("pointerdown", e => {
-        setPointer(e);
-        if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
-      }, { passive: true });
-      canvas.addEventListener("pointermove", e => setPointer(e), { passive: true });
-      const releasePointer = () => { pointer.active = false; };
-      canvas.addEventListener("pointerup", releasePointer, { passive: true });
-      canvas.addEventListener("pointercancel", releasePointer, { passive: true });
-      canvas.addEventListener("lostpointercapture", releasePointer, { passive: true });
-      canvas.addEventListener("pointerleave", e => {
-        if (e.pointerType === "mouse") pointer.active = false;
-      }, { passive: true });
-      window.addEventListener("resize", resize, { passive: true });
+      // Mouse and touch start
+      canvas.addEventListener("pointerdown", (e) => {
+        if (e.pointerType === "touch") {
+          pointer.pointerId = e.pointerId;
 
-      function animate(now) {
-        requestAnimationFrame(animate);
-        const delta = previousTime ? Math.min(now - previousTime, 40) : 16.67;
-        previousTime = now;
-        const pointerMoving = pointer.active && now - pointer.last < 110;
-        const influenceRadius = Math.min(150, Math.max(105, width * 0.13));
+          canvas.setPointerCapture(e.pointerId);
+        }
 
-        // Fade the transparent 2D overlay to retain the original subtle particle trails.
-        trailCtx.fillStyle = "rgba(3, 4, 12, 0.24)";
-        trailCtx.fillRect(0, 0, width, height);
+        pointer.lastX = null;
+        pointer.lastY = null;
+
+        updatePointer(e);
+      });
+
+      // Mouse movement and touch dragging
+      canvas.addEventListener("pointermove", (e) => {
+        // Only track the active touch
+        if (e.pointerType === "touch" && pointer.pointerId !== e.pointerId) {
+          return;
+        }
+
+        updatePointer(e);
+      });
+
+      // End touch interaction
+      function stopTouch(e) {
+        if (e.pointerType === "touch" && pointer.pointerId === e.pointerId) {
+          pointer.active = false;
+          pointer.energy = 0;
+
+          pointer.lastX = null;
+          pointer.lastY = null;
+
+          pointer.pointerId = null;
+        }
+      }
+
+      canvas.addEventListener("pointerup", stopTouch);
+      canvas.addEventListener("pointercancel", stopTouch);
+      canvas.addEventListener("lostpointercapture", stopTouch);
+
+      // Stop mouse interaction when leaving canvas
+      canvas.addEventListener("pointerleave", (e) => {
+        if (e.pointerType === "mouse") {
+          pointer.active = false;
+          pointer.energy = 0;
+
+          pointer.lastX = null;
+          pointer.lastY = null;
+        }
+      });
+
+      // ==========================================
+      // RESPONSIVE CANVAS
+      // ==========================================
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        width = window.innerWidth;
+        height = window.innerHeight;
+
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        createParticles();
+      }
+
+      // ==========================================
+      // S-SHAPED PARTICLE PATH
+      // ==========================================
+
+      function getPath(t) {
+        const x0 = width * 0.05;
+        const y0 = height * 0.7;
+
+        const x1 = width * 0.29;
+        const y1 = height * 0.12;
+
+        const x2 = width * 0.71;
+        const y2 = height * 0.9;
+
+        const x3 = width * 0.95;
+        const y3 = height * 0.3;
+
+        const u = 1 - t;
+
+        // Bezier curve position
+        const x =
+          u * u * u * x0 +
+          3 * u * u * t * x1 +
+          3 * u * t * t * x2 +
+          t * t * t * x3;
+
+        const y =
+          u * u * u * y0 +
+          3 * u * u * t * y1 +
+          3 * u * t * t * y2 +
+          t * t * t * y3;
+
+        // Direction along the curve
+        const dx =
+          3 * u * u * (x1 - x0) + 6 * u * t * (x2 - x1) + 3 * t * t * (x3 - x2);
+
+        const dy =
+          3 * u * u * (y1 - y0) + 6 * u * t * (y2 - y1) + 3 * t * t * (y3 - y2);
+
+        const length = Math.sqrt(dx * dx + dy * dy) || 1;
+
+        // Perpendicular direction
+        const nx = -dy / length;
+        const ny = dx / length;
+
+        return { x, y, nx, ny };
+      }
+
+      // ==========================================
+      // CREATE PARTICLES
+      // ==========================================
+
+      function createParticles() {
+        particles = [];
+
+        const bandWidth = Math.min(width, height) * CONFIG.pathWidth;
 
         for (let i = 0; i < PARTICLE_COUNT; i++) {
-          const p = particles[i];
-          p.t += p.speed * delta * (p.reverse ? -1 : 1);
-          if (p.t >= 1) { p.t = 1; p.reverse = true; }
-          if (p.t <= 0) { p.t = 0; p.reverse = false; }
+          const progress = 0.015 + Math.random() * 0.97;
 
-          const target = pathPoint(p.t);
-          const wave = Math.sin(now * 0.0007 + p.phase) * 2.2;
-          const tx = target.x + wave;
-          const ty = target.y + Math.cos(now * 0.00055 + p.phase) * 2.2;
-          let ax = (tx - p.x) * 0.018;
-          let ay = (ty - p.y) * 0.018;
+          const offset = (Math.random() - 0.5) * bandWidth;
 
-          if (pointer.active) {
-            const dx = p.x - pointer.x, dy = p.y - pointer.y;
-            const dist = Math.hypot(dx, dy);
-            if (dist < influenceRadius && dist > 0.01) {
-              const force = Math.pow(1 - dist / influenceRadius, 2) * (pointerMoving ? 2.4 : 1.35);
-              const nx = dx / dist, ny = dy / dist;
-              ax += nx * force;
-              ay += ny * force;
-              if (pointerMoving) {
-                ax += pointer.vx * force * 0.16;
-                ay += pointer.vy * force * 0.16;
-              }
-            }
+          const path = getPath(progress);
+
+          const x = path.x + path.nx * offset;
+          const y = path.y + path.ny * offset;
+
+          particles.push({
+            progress: progress,
+
+            direction: Math.random() > 0.5 ? 1 : -1,
+
+            flowSpeed: CONFIG.flowSpeed * (0.5 + Math.random()),
+
+            offset: offset,
+
+            x: x,
+            y: y,
+
+            homeX: x,
+            homeY: y,
+
+            vx: 0,
+            vy: 0,
+
+            size: Math.random() * 1.5 + 0.6,
+
+            brightness: Math.random() * 0.5 + 0.5,
+
+            phase: Math.random() * Math.PI * 2,
+
+            color: Math.random() > 0.8 ? "190,180,255" : "240,240,255",
+          });
+        }
+      }
+
+      // ==========================================
+      // DRAW PATH GUIDE
+      // ==========================================
+
+      function drawGuidePath() {
+        ctx.beginPath();
+
+        const start = getPath(0);
+
+        ctx.moveTo(start.x, start.y);
+
+        for (let i = 1; i <= 100; i++) {
+          const p = getPath(i / 100);
+
+          ctx.lineTo(p.x, p.y);
+        }
+
+        ctx.strokeStyle = "rgba(150,140,255,0.045)";
+        ctx.lineWidth = 2;
+
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = "#7777ff";
+
+        ctx.stroke();
+
+        ctx.shadowBlur = 0;
+      }
+
+      // ==========================================
+      // MAIN ANIMATION
+      // ==========================================
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        animationTime += 0.016;
+
+        // Create smooth motion trails
+        ctx.fillStyle = "rgba(3,4,12,0.20)";
+
+        ctx.fillRect(0, 0, width, height);
+
+        // Gradually reduce pointer influence
+        pointer.energy *= 0.975;
+
+        pointer.vx *= 0.88;
+        pointer.vy *= 0.88;
+
+        drawGuidePath();
+
+        // ======================================
+        // PARTICLE PHYSICS
+        // ======================================
+
+        for (const p of particles) {
+          // Move particle along the S-shaped path
+          p.progress += p.direction * p.flowSpeed;
+
+          // Reverse at the endpoints
+          if (p.progress >= 0.985) {
+            p.progress = 0.985;
+            p.direction = -1;
           }
 
-          p.vx = (p.vx + ax) * 0.91;
-          p.vy = (p.vy + ay) * 0.91;
+          if (p.progress <= 0.015) {
+            p.progress = 0.015;
+            p.direction = 1;
+          }
+
+          // Calculate its natural position
+          const path = getPath(p.progress);
+
+          p.homeX = path.x + path.nx * p.offset;
+
+          p.homeY = path.y + path.ny * p.offset;
+
+          // ==================================
+          // MOUSE / TOUCH DISPERSION
+          // ==================================
+
+          const dx = p.x - pointer.x;
+          const dy = p.y - pointer.y;
+
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          if (
+            pointer.active &&
+            pointer.energy > 0.015 &&
+            distance < CONFIG.interactionRadius
+          ) {
+            const influence =
+              Math.pow(1 - distance / CONFIG.interactionRadius, 2) *
+              pointer.energy;
+
+            const nx = distance > 0.1 ? dx / distance : 1;
+
+            const ny = distance > 0.1 ? dy / distance : 0;
+
+            // Scatter away from pointer
+            p.vx += nx * influence * CONFIG.dispersion;
+
+            p.vy += ny * influence * CONFIG.dispersion;
+
+            // Temporarily follow pointer movement
+            p.vx += pointer.vx * influence * CONFIG.mouseFollow;
+
+            p.vy += pointer.vy * influence * CONFIG.mouseFollow;
+
+            // Add swirling effect
+            p.vx += -ny * influence * 0.3;
+            p.vy += nx * influence * 0.3;
+          }
+
+          // ==================================
+          // RETURN TO FLOWING PATH
+          // ==================================
+
+          p.vx += (p.homeX - p.x) * CONFIG.returnForce;
+
+          p.vy += (p.homeY - p.y) * CONFIG.returnForce;
+
+          // Smooth friction
+          p.vx *= CONFIG.friction;
+          p.vy *= CONFIG.friction;
+
+          // Speed limits
+          p.vx = Math.max(-18, Math.min(18, p.vx));
+          p.vy = Math.max(-18, Math.min(18, p.vy));
+
+          // Update position
           p.x += p.vx;
           p.y += p.vy;
 
-          // Convert screen coordinates to the orthographic camera's world coordinates.
-          positions[i * 3] = p.x - width / 2;
-          positions[i * 3 + 1] = height / 2 - p.y;
-          positions[i * 3 + 2] = 0;
+          // ==================================
+          // DRAW PARTICLE
+          // ==================================
 
-          // Preserve the original soft trail and its white/violet particle palette.
-          const rgb = p.violet ? "190, 151, 255" : "235, 239, 255";
-          const twinkle = 0.72 + Math.sin(now * 0.0018 + p.phase) * 0.22;
-          trailCtx.beginPath();
-          trailCtx.fillStyle = `rgba(${rgb}, ${p.alpha * twinkle * 0.10})`;
-          trailCtx.arc(p.x, p.y, p.size * 2.8, 0, Math.PI * 2);
-          trailCtx.fill();
+          const twinkle = 0.8 + Math.sin(animationTime * 2 + p.phase) * 0.2;
+
+          const opacity = p.brightness * twinkle;
+
+          ctx.beginPath();
+
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+
+          ctx.fillStyle = `rgba(${p.color},${opacity})`;
+
+          ctx.shadowBlur = CONFIG.glow * p.size;
+
+          ctx.shadowColor = p.color === "190,180,255" ? "#aaaaff" : "#ffffff";
+
+          ctx.fill();
         }
 
-        geometry.attributes.position.needsUpdate = true;
-        uniforms.uTime.value = now * 0.001;
-        renderer.render(scene, camera);
+        ctx.shadowBlur = 0;
       }
 
-      resize();
-      requestAnimationFrame(animate);
+      // ==========================================
+      // START APPLICATION
+      // ==========================================
 
-      window.addEventListener("pagehide", () => {
-        geometry.dispose();
-        material.dispose();
-        renderer.dispose();
-      }, { once: true });
-    })();
-  </script>
-</body>
+      window.addEventListener("resize", resize);
+
+      resize();
+      animate();
+    </script>
+  </body>
 </html>
