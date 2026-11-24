@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#03040c" />
+  <title>This Is Great — Particle Flow</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #03040c; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    canvas {
+      position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+      touch-action: none; cursor: crosshair;
+    }
+    h1 {
+      position: fixed; z-index: 2; top: clamp(22px, 5vh, 52px); left: 0; width: 100%;
+      margin: 0; padding: 0 16px; text-align: center; pointer-events: none;
+      color: rgba(247, 245, 255, .94); font-size: clamp(18px, 3vw, 30px);
+      font-weight: 650; letter-spacing: .34em; text-indent: .34em;
+      text-shadow: 0 0 18px rgba(178, 143, 255, .35);
+    }
+    .hint {
+      position: fixed; z-index: 2; bottom: max(18px, env(safe-area-inset-bottom));
+      left: 0; width: 100%; text-align: center; pointer-events: none;
+      color: rgba(205, 199, 230, .43); font-size: 11px; letter-spacing: .12em;
+    }
+  </style>
+</head>
+<body>
+  <h1>THIS IS GREAT</h1>
+  <canvas id="scene" aria-label="Interactive flowing particle animation"></canvas>
+  <div class="hint">MOVE YOUR POINTER OR TOUCH THE PARTICLES</div>
+  <script>
+    (() => {
+      const canvas = document.getElementById("scene");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const PARTICLE_COUNT = 480;
+      const particles = [];
+      const pointer = { x: 0, y: 0, px: 0, py: 0, active: false, vx: 0, vy: 0, last: 0 };
+      let width = 0, height = 0, dpr = 1, frame = 0;
+
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const random = (a, b) => a + Math.random() * (b - a);
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      // A flowing S-shaped cubic Bezier path, scaled to the current screen.
+      function pathPoint(t) {
+        const x0 = width * 0.10, x1 = width * 0.90;
+        const y0 = height * 0.30, y1 = height * 0.72;
+        const bend = Math.min(height * 0.27, width * 0.20);
+        const p0 = { x: x0, y: y0 };
+        const p1 = { x: width * 0.82, y: y0 - bend };
+        const p2 = { x: width * 0.18, y: y1 + bend };
+        const p3 = { x: x1, y: y1 };
+        const u = 1 - t;
+        return {
+          x: u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x,
+          y: u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y
+        };
+      }
+
+      function createParticle(i) {
+        const t = i / PARTICLE_COUNT;
+        const p = pathPoint(t);
+        return {
+          t, speed: random(0.000055, 0.000105),
+          x: p.x + random(-10, 10), y: p.y + random(-10, 10),
+          vx: 0, vy: 0, size: random(0.65, 1.8),
+          alpha: random(0.45, 0.95), hue: Math.random() < 0.28 ? 268 : 0,
+          phase: random(0, Math.PI * 2)
+        };
+      }
+
+      for (let i = 0; i < PARTICLE_COUNT; i++) particles.push(createParticle(i));
+
+      function setPointer(e) {
+        const now = performance.now();
+        const dt = Math.max(8, now - pointer.last);
+        const x = e.clientX, y = e.clientY;
+        pointer.vx = clamp((x - pointer.x) / dt, -2.5, 2.5);
+        pointer.vy = clamp((y - pointer.y) / dt, -2.5, 2.5);
+        pointer.px = pointer.x; pointer.py = pointer.y;
+        pointer.x = x; pointer.y = y;
+        pointer.last = now; pointer.active = true;
+      }
+
+      canvas.addEventListener("pointerdown", e => {
+        setPointer(e);
+        if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+      }, { passive: true });
+      canvas.addEventListener("pointermove", e => setPointer(e), { passive: true });
+      const releasePointer = () => { pointer.active = false; };
+      canvas.addEventListener("pointerup", releasePointer, { passive: true });
+      canvas.addEventListener("pointercancel", releasePointer, { passive: true });
+      canvas.addEventListener("lostpointercapture", releasePointer, { passive: true });
+      canvas.addEventListener("pointerleave", e => {
+        if (e.pointerType === "mouse") pointer.active = false;
+      }, { passive: true });
+      window.addEventListener("resize", resize, { passive: true });
+      resize();
+
+      function draw(now) {
+        frame++;
+        ctx.fillStyle = "rgba(3, 4, 12, 0.24)";
+        ctx.fillRect(0, 0, width, height);
+
+        const influenceRadius = Math.min(150, Math.max(105, width * 0.13));
+        const pointerMoving = pointer.active && now - pointer.last < 110;
+        const flowDirection = 1;
+
+        for (const p of particles) {
+          // Advance along the curve; reverse at either endpoint.
+          p.t += p.speed * (now - (p._last || now)) * flowDirection * (p.reverse ? -1 : 1);
+          if (p.t >= 1) { p.t = 1; p.reverse = true; }
+          if (p.t <= 0) { p.t = 0; p.reverse = false; }
+          p._last = now;
+
+          const target = pathPoint(p.t);
+          const wave = Math.sin(now * 0.0007 + p.phase) * 2.2;
+          const tx = target.x + wave;
+          const ty = target.y + Math.cos(now * 0.00055 + p.phase) * 2.2;
+
+          let ax = (tx - p.x) * 0.018;
+          let ay = (ty - p.y) * 0.018;
+
+          if (pointer.active) {
+            const dx = p.x - pointer.x, dy = p.y - pointer.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < influenceRadius && dist > 0.01) {
+              const force = Math.pow(1 - dist / influenceRadius, 2) * (pointerMoving ? 2.4 : 1.35);
+              const nx = dx / dist, ny = dy / dist;
+              ax += nx * force;
+              ay += ny * force;
+              if (pointerMoving) {
+                ax += pointer.vx * force * 0.16;
+                ay += pointer.vy * force * 0.16;
+              }
+            }
+          }
+
+          p.vx = (p.vx + ax) * 0.91;
+          p.vy = (p.vy + ay) * 0.91;
+          p.x += p.vx;
+          p.y += p.vy;
+
+          const twinkle = 0.72 + Math.sin(now * 0.0018 + p.phase) * 0.22;
+          const alpha = p.alpha * twinkle;
+          const violet = p.hue === 268;
+          const color = violet ? "190, 151, 255" : "235, 239, 255";
+          const radius = p.size * (violet ? 1.12 : 1);
+
+          ctx.beginPath();
+          ctx.fillStyle = `rgba(${color}, ${alpha * 0.16})`;
+          ctx.arc(p.x, p.y, radius * 4.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.fillStyle = `rgba(${color}, ${alpha})`;
+          ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // A restrained ambient haze keeps the scene dimensional without obscuring the path.
+        const glow = ctx.createRadialGradient(width * 0.5, height * 0.52, 0, width * 0.5, height * 0.52, Math.max(width, height) * 0.55);
+        glow.addColorStop(0, "rgba(72, 48, 125, 0.035)");
+        glow.addColorStop(1, "rgba(3, 4, 12, 0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, width, height);
+
+        requestAnimationFrame(draw);
+      }
+
+      ctx.fillStyle = "#03040c";
+      ctx.fillRect(0, 0, width, height);
+      requestAnimationFrame(draw);
+    })();
+  </script>
+</body>
+</html>
