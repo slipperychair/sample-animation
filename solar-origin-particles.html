@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#03040a">
+  <title>Solar Origin — Particle Field</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; margin: 0; overflow: hidden;
+      background: #03040a;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #scene {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      display: block; touch-action: none; cursor: crosshair;
+    }
+    .overlay {
+      position: fixed; inset: 0; z-index: 2; pointer-events: none;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: space-between; padding:
+        max(30px, env(safe-area-inset-top)) 18px
+        max(22px, env(safe-area-inset-bottom));
+    }
+    header { text-align: center; }
+    h1 {
+      margin: 0; color: rgba(250, 244, 235, .94);
+      font-size: clamp(19px, 3vw, 29px); font-weight: 600;
+      letter-spacing: .38em; text-indent: .38em;
+      text-shadow: 0 0 24px rgba(255, 166, 77, .2);
+    }
+    .subtitle {
+      margin-top: 11px; color: rgba(225, 211, 194, .48);
+      font-size: 10px; letter-spacing: .24em; text-transform: uppercase;
+    }
+    footer {
+      color: rgba(216, 203, 188, .42); font-size: 10px;
+      letter-spacing: .17em; text-align: center;
+    }
+    #status {
+      position: fixed; z-index: 5; left: 12px; right: 12px; bottom: 12px;
+      display: none; padding: 12px; border: 1px solid #68503a;
+      border-radius: 8px; color: #ffe6c9; background: #1a120d;
+      font: 13px/1.5 system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene" aria-label="Three-dimensional solar particle field"></canvas>
+  <div class="overlay">
+    <header>
+      <h1>SOLAR ORIGIN</h1>
+      <div class="subtitle">A living field of particles</div>
+    </header>
+    <footer>MOVE OR TOUCH TO DISTURB THE PARTICLE FIELD</footer>
+  </div>
+  <div id="status" role="status"></div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
+
+    (() => {
+      const canvas = document.getElementById("scene");
+      const status = document.getElementById("status");
+      const COUNT = 1900;
+      const particles = [];
+      const pointer = { x: 0, y: 0, active: false, last: 0 };
+      let width = innerWidth, height = innerHeight;
+      let pixelRatio = 1, previousTime = 0;
+      let renderer;
+
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const rand = (a, b) => a + Math.random() * (b - a);
+
+      try {
+        renderer = new THREE.WebGLRenderer({
+          canvas, antialias: true, alpha: false,
+          powerPreference: "high-performance"
+        });
+      } catch (error) {
+        status.style.display = "block";
+        status.textContent =
+          "WebGL is unavailable. Try an updated Chrome, Edge or Firefox browser with hardware acceleration enabled.";
+        return;
+      }
+
+      renderer.setClearColor(0x03040a, 1);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x03040a, 0.018);
+
+      const camera = new THREE.PerspectiveCamera(48, width / height, 0.1, 180);
+      camera.position.set(0, 0, 34);
+
+      // Ambient environment and central light source.
+      scene.add(new THREE.AmbientLight(0x6b5260, 0.35));
+      const sunLight = new THREE.PointLight(0xffa34a, 95, 90, 1.8);
+      sunLight.position.set(0, 0, 0);
+      scene.add(sunLight);
+
+      // Sun surface: layered emissive spheres create a compact luminous body.
+      const sunGroup = new THREE.Group();
+      scene.add(sunGroup);
+
+      const sunGeometry = new THREE.SphereGeometry(1.18, 48, 48);
+      const sunMaterial = new THREE.MeshStandardMaterial({
+        color: 0xffa64d,
+        emissive: 0xff641e,
+        emissiveIntensity: 2.1,
+        roughness: 0.82,
+        metalness: 0
+      });
+      const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+      sunGroup.add(sun);
+
+      const innerGlow = new THREE.Mesh(
+        new THREE.SphereGeometry(1.42, 40, 40),
+        new THREE.MeshBasicMaterial({
+          color: 0xff8a36, transparent: true, opacity: 0.16,
+          side: THREE.BackSide, depthWrite: false
+        })
+      );
+      sunGroup.add(innerGlow);
+
+      // Shader-driven corona: soft radial halo around the Sun.
+      const coronaMaterial = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: { uTime: { value: 0 } },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix *
+                          vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          uniform float uTime;
+          void main() {
+            vec2 p = vUv - 0.5;
+            float d = length(p) * 2.0;
+            float pulse = 0.92 + 0.08 * sin(uTime * 1.3);
+            float glow = pow(max(0.0, 1.0 - d), 3.0) *
+                         smoothstep(1.0, 0.18, d);
+            gl_FragColor = vec4(1.0, 0.35, 0.09, glow * 0.32 * pulse);
+          }
+        `
+      });
+      const corona = new THREE.Mesh(
+        new THREE.PlaneGeometry(8.5, 8.5), coronaMaterial
+      );
+      corona.position.z = -0.25;
+      sunGroup.add(corona);
+
+      // Subtle star background at several depths.
+      const starCount = 850;
+      const starPositions = new Float32Array(starCount * 3);
+      const starSizes = new Float32Array(starCount);
+      for (let i = 0; i < starCount; i++) {
+        const radius = rand(20, 95);
+        const angle = rand(0, Math.PI * 2);
+        starPositions[i * 3] = Math.cos(angle) * radius;
+        starPositions[i * 3 + 1] = Math.sin(angle) * radius;
+        starPositions[i * 3 + 2] = rand(-55, -12);
+        starSizes[i] = rand(0.35, 1.05);
+      }
+      const starGeometry = new THREE.BufferGeometry();
+      starGeometry.setAttribute("position",
+        new THREE.BufferAttribute(starPositions, 3));
+      starGeometry.setAttribute("aSize",
+        new THREE.BufferAttribute(starSizes, 1));
+      const starMaterial = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false,
+        vertexShader: `
+          attribute float aSize;
+          void main() {
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mv;
+            gl_PointSize = aSize;
+          }
+        `,
+        fragmentShader: `
+          void main() {
+            float d = length(gl_PointCoord - 0.5);
+            float a = 1.0 - smoothstep(0.25, 0.5, d);
+            gl_FragColor = vec4(0.68, 0.72, 0.84, a * 0.52);
+          }
+        `
+      });
+      const stars = new THREE.Points(starGeometry, starMaterial);
+      scene.add(stars);
+
+      // Particle shader: small, medium and bright large particles share one
+      // efficient draw call, but each has its own size, colour and intensity.
+      const positions = new Float32Array(COUNT * 3);
+      const sizes = new Float32Array(COUNT);
+      const brightness = new Float32Array(COUNT);
+      const colors = new Float32Array(COUNT * 3);
+      const phases = new Float32Array(COUNT);
+
+      const particleGeometry = new THREE.BufferGeometry();
+      particleGeometry.setAttribute("position",
+        new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+      particleGeometry.setAttribute("aSize",
+        new THREE.BufferAttribute(sizes, 1));
+      particleGeometry.setAttribute("aBrightness",
+        new THREE.BufferAttribute(brightness, 1));
+      particleGeometry.setAttribute("aColor",
+        new THREE.BufferAttribute(colors, 3));
+      particleGeometry.setAttribute("aPhase",
+        new THREE.BufferAttribute(phases, 1));
+
+      const particleMaterial = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: { uTime: { value: 0 }, uPixelRatio: { value: 1 } },
+        vertexShader: `
+          attribute float aSize;
+          attribute float aBrightness;
+          attribute vec3 aColor;
+          attribute float aPhase;
+          uniform float uTime;
+          uniform float uPixelRatio;
+          varying vec3 vColor;
+          varying float vBrightness;
+          varying float vTwinkle;
+          void main() {
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mv;
+            float depthScale = clamp(24.0 / max(1.0, -mv.z), 0.45, 2.2);
+            gl_PointSize = aSize * uPixelRatio * depthScale;
+            vColor = aColor;
+            vBrightness = aBrightness;
+            vTwinkle = 0.82 + 0.18 * sin(uTime * 1.4 + aPhase);
+          }
+        `,
+        fragmentShader: `
+          varying vec3 vColor;
+          varying float vBrightness;
+          varying float vTwinkle;
+          void main() {
+            vec2 p = gl_PointCoord - 0.5;
+            float d = length(p);
+            float core = 1.0 - smoothstep(0.05, 0.30, d);
+            float edge = 1.0 - smoothstep(0.28, 0.50, d);
+            float a = (core * 0.72 + edge * 0.28) *
+                      vBrightness * vTwinkle;
+            if (a < 0.012) discard;
+            gl_FragColor = vec4(vColor * (0.78 + core * 0.65), a);
+          }
+        `
+      });
+
+      const particleCloud = new THREE.Points(particleGeometry, particleMaterial);
+      particleCloud.frustumCulled = false;
+      scene.add(particleCloud);
+
+      const palette = [
+        { color: [1.0, 0.48, 0.19], size: [0.7, 1.25], bright: [0.20, 0.42] },
+        { color: [1.0, 0.72, 0.40], size: [1.25, 2.0], bright: [0.48, 0.78] },
+        { color: [1.0, 0.91, 0.70], size: [2.1, 3.5], bright: [0.88, 1.35] },
+        { color: [0.75, 0.78, 1.0], size: [0.85, 1.65], bright: [0.35, 0.70] }
+      ];
+
+      function spawnParticle(i, initial = false) {
+        const typeRoll = Math.random();
+        const type = typeRoll < 0.58 ? 0 : typeRoll < 0.87 ? 1 : 2;
+        const style = palette[type];
+        const angle = rand(0, Math.PI * 2);
+        const radius = initial ? rand(1.4, 24) : rand(1.15, 1.8);
+        const z = rand(-5.5, 5.5);
+        const direction = new THREE.Vector3(
+          Math.cos(angle), Math.sin(angle), rand(-0.18, 0.18)
+        ).normalize();
+
+        const speed = type === 2 ? rand(0.022, 0.040) :
+                      type === 1 ? rand(0.018, 0.032) :
+                                   rand(0.014, 0.027);
+
+        const p = particles[i] || {};
+        p.position = new THREE.Vector3(
+          Math.cos(angle) * radius,
+          Math.sin(angle) * radius,
+          z
+        );
+        p.velocity = direction.multiplyScalar(speed);
+        p.age = initial ? rand(0, 900) : 0;
+        p.life = rand(650, 1150);
+        p.size = rand(style.size[0], style.size[1]);
+        p.brightness = rand(style.bright[0], style.bright[1]);
+        p.color = style.color;
+        p.phase = rand(0, Math.PI * 2);
+        p.type = type;
+        p.seed = rand(0, 1000);
+        particles[i] = p;
+        return p;
+      }
+
+      for (let i = 0; i < COUNT; i++) {
+        const p = spawnParticle(i, true);
+        sizes[i] = p.size;
+        brightness[i] = p.brightness;
+        phases[i] = p.phase;
+        colors.set(p.color, i * 3);
+        positions[i * 3] = p.position.x;
+        positions[i * 3 + 1] = p.position.y;
+        positions[i * 3 + 2] = p.position.z;
+      }
+
+      // A ray from the camera through the pointer gives touch and mouse
+      // interaction a consistent position in the 3D particle field.
+      const raycaster = new THREE.Raycaster();
+      const pointerNdc = new THREE.Vector2();
+      const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+      const pointerWorld = new THREE.Vector3();
+
+      function updatePointer(e) {
+        pointerNdc.x = (e.clientX / width) * 2 - 1;
+        pointerNdc.y = -(e.clientY / height) * 2 + 1;
+        raycaster.setFromCamera(pointerNdc, camera);
+        raycaster.ray.intersectPlane(interactionPlane, pointerWorld);
+        pointer.x = pointerWorld.x;
+        pointer.y = pointerWorld.y;
+        pointer.last = performance.now();
+        pointer.active = true;
+      }
+
+      canvas.addEventListener("pointerdown", e => {
+        updatePointer(e);
+        if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+      }, { passive: true });
+      canvas.addEventListener("pointermove", updatePointer, { passive: true });
+      const release = () => { pointer.active = false; };
+      canvas.addEventListener("pointerup", release, { passive: true });
+      canvas.addEventListener("pointercancel", release, { passive: true });
+      canvas.addEventListener("lostpointercapture", release, { passive: true });
+      canvas.addEventListener("pointerleave", e => {
+        if (e.pointerType === "mouse") pointer.active = false;
+      }, { passive: true });
+
+      function resize() {
+        width = innerWidth;
+        height = innerHeight;
+        pixelRatio = Math.min(devicePixelRatio || 1, 1.8);
+        renderer.setPixelRatio(pixelRatio);
+        renderer.setSize(width, height, false);
+        camera.aspect = width / height;
+        camera.position.z = width < 600 ? 42 : 34;
+        camera.updateProjectionMatrix();
+        particleMaterial.uniforms.uPixelRatio.value = pixelRatio;
+      }
+      addEventListener("resize", resize, { passive: true });
+      resize();
+
+      const clock = new THREE.Clock();
+
+      function animate(now) {
+        requestAnimationFrame(animate);
+        const delta = Math.min(clock.getDelta(), 0.04);
+        const elapsed = now * 0.001;
+        const pointerIsFresh = pointer.active && now - pointer.last < 130;
+
+        sun.rotation.y += delta * 0.10;
+        sun.rotation.x = Math.sin(elapsed * 0.12) * 0.06;
+        innerGlow.scale.setScalar(1 + Math.sin(elapsed * 1.2) * 0.018);
+        coronaMaterial.uniforms.uTime.value = elapsed;
+        particleMaterial.uniforms.uTime.value = elapsed;
+        stars.rotation.z = elapsed * 0.0018;
+
+        // A restrained camera drift adds depth without taking control away.
+        camera.position.x = Math.sin(elapsed * 0.10) * 0.38;
+        camera.position.y = Math.cos(elapsed * 0.08) * 0.24;
+        camera.lookAt(0, 0, 0);
+
+        for (let i = 0; i < COUNT; i++) {
+          let p = particles[i];
+          p.age += delta * 60;
+
+          // Gentle curved solar-wind motion rather than straight radial lines.
+          const swirl = 0.10 + (p.type * 0.025);
+          const tangentX = -p.position.y;
+          const tangentY = p.position.x;
+          const radial = Math.max(1.2, Math.hypot(p.position.x, p.position.y));
+          const inv = 1 / radial;
+
+          p.velocity.x += tangentX * inv * swirl * delta * 0.035;
+          p.velocity.y += tangentY * inv * swirl * delta * 0.035;
+
+          if (pointerIsFresh) {
+            const dx = p.position.x - pointer.x;
+            const dy = p.position.y - pointer.y;
+            const d2 = dx * dx + dy * dy;
+            const radius = 7.0;
+            if (d2 < radius * radius && d2 > 0.0001) {
+              const d = Math.sqrt(d2);
+              const force = (1 - d / radius) * 0.65 * delta;
+              p.velocity.x += (dx / d) * force;
+              p.velocity.y += (dy / d) * force;
+            }
+          }
+
+          p.position.addScaledVector(p.velocity, delta * 60);
+          p.velocity.multiplyScalar(Math.pow(0.999, delta * 60));
+
+          const distance = p.position.length();
+          if (p.age > p.life || distance > 39) {
+            p = spawnParticle(i, false);
+            sizes[i] = p.size;
+            brightness[i] = p.brightness;
+            phases[i] = p.phase;
+            colors.set(p.color, i * 3);
+          }
+
+          positions[i * 3] = p.position.x;
+          positions[i * 3 + 1] = p.position.y;
+          positions[i * 3 + 2] = p.position.z;
+        }
+
+        particleGeometry.attributes.position.needsUpdate = true;
+        particleGeometry.attributes.aSize.needsUpdate = true;
+        particleGeometry.attributes.aBrightness.needsUpdate = true;
+        particleGeometry.attributes.aColor.needsUpdate = true;
+        particleGeometry.attributes.aPhase.needsUpdate = true;
+
+        renderer.render(scene, camera);
+      }
+
+      requestAnimationFrame(animate);
+
+      addEventListener("pagehide", () => {
+        sunGeometry.dispose();
+        sunMaterial.dispose();
+        innerGlow.geometry.dispose();
+        innerGlow.material.dispose();
+        corona.geometry.dispose();
+        coronaMaterial.dispose();
+        starGeometry.dispose();
+        starMaterial.dispose();
+        particleGeometry.dispose();
+        particleMaterial.dispose();
+        renderer.dispose();
+      }, { once: true });
+    })();
+  </script>
+</body>
+</html>
