@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sol Astra — Interactive 3D Solar Simulation</title>
+    <!-- Three.js r128 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <style>
+        /* Pure, distraction-free full-viewport touch optimization for Android & Mobile */
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #020206;
+            touch-action: none;
+            overscroll-behavior: none;
+        }
+
+        #canvas-container {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            touch-action: none;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Fullscreen 3D WebGL Canvas Container (Zero HUD / Controls) -->
+    <div id="canvas-container"></div>
+
+    <script>
+        /**
+         * SOL ASTRA — Serene Interactive 3D Star & Orbital Particle Cluster
+         *  - Tiny, intense pinpoint star with multi-layered additive corona & diffraction glow.
+         *  - Slow, weightless particle emergence along logarithmic/curved spiral paths that
+         *    settle into organic, swirling 3D orbits around the star.
+         *  - Smooth Android touch & desktop pointer dispersion with soft spring return.
+         */
+        window.onload = function () {
+            const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
+
+            const CONFIG = {
+                particleCount: isMobile ? 3400 : 4800,
+                bgStarCount: isMobile ? 450 : 800,
+                coreRadius: 0.22,             // Tiny pinpoint star core
+                minOrbitRadius: 1.4,          // Inner boundary of orbiting cluster
+                maxOrbitRadius: 11.5,         // Outer boundary of orbiting cluster
+                interactionRadius: isMobile ? 2.3 : 2.0, // Tight, localized dispersion radius around finger/cursor
+                springStiffness: 0.014,       // Gentle, floaty spring return back to orbit
+                damping: 0.92,                // Silky viscous damping for slow-motion grace
+                timeScale: 0.32               // Global slow-motion pacing
+            };
+
+            const state = {
+                pointerActive: false,
+                pointerNDC: new THREE.Vector2(999, 999),
+                pointerWorld: new THREE.Vector3(0, 0, 0),
+                prevPointerWorld: new THREE.Vector3(0, 0, 0),
+                pointerVelocity: new THREE.Vector3(0, 0, 0),
+                time: 0
+            };
+
+            // --- 1. SCENE, CAMERA & RENDERER ---
+            const container = document.getElementById('canvas-container');
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020206, 0.016);
+
+            const camera = new THREE.PerspectiveCamera(
+                48,
+                window.innerWidth / window.innerHeight,
+                0.1,
+                150
+            );
+
+            function updateCameraDistance() {
+                const aspect = window.innerWidth / window.innerHeight;
+                camera.position.z = aspect < 1 ? 22.0 : 17.0;
+                camera.position.y = 0;
+                camera.lookAt(0, 0, 0);
+            }
+            updateCameraDistance();
+
+            const renderer = new THREE.WebGLRenderer({
+                antialias: !isMobile,
+                powerPreference: 'high-performance',
+                alpha: false
+            });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x020206, 1);
+            container.appendChild(renderer.domElement);
+
+            // --- 2. PROCEDURAL RADIAL GLOW TEXTURES ---
+            function createGlowTexture(size, stops) {
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                const half = size / 2;
+                const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+                stops.forEach(([offset, color]) => grad.addColorStop(offset, color));
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, size, size);
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.needsUpdate = true;
+                return texture;
+            }
+
+            // Soft glowing orb texture for individual orbiting particles
+            const particleTexture = createGlowTexture(128, [
+                [0.0, 'rgba(255, 255, 255, 1.0)'],
+                [0.18, 'rgba(255, 255, 255, 0.94)'],
+                [0.45, 'rgba(235, 245, 255, 0.42)'],
+                [0.75, 'rgba(210, 230, 255, 0.12)'],
+                [1.0, 'rgba(0, 0, 0, 0.0)']
+            ]);
+
+            // Intense pinpoint star glow + delicate atmospheric corona
+            const starHaloTexture = createGlowTexture(512, [
+                [0.0, 'rgba(255, 255, 255, 1.0)'],
+                [0.06, 'rgba(255, 250, 232, 0.96)'],
+                [0.16, 'rgba(255, 212, 130, 0.62)'],
+                [0.36, 'rgba(255, 155, 55, 0.22)'],
+                [0.65, 'rgba(235, 95, 20, 0.05)'],
+                [1.0, 'rgba(0, 0, 0, 0.0)']
+            ]);
+
+            // --- 3. TINY RADIANT PINPOINT STAR ---
+            const starGroup = new THREE.Group();
+            scene.add(starGroup);
+
+            // Tiny incandescent white-gold core sphere
+            const coreMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.coreRadius, 24, 24),
+                new THREE.MeshBasicMaterial({ color: 0xfffdf5 })
+            );
+            starGroup.add(coreMesh);
+
+            // Inner tight radiant bloom sprite
+            const innerGlow = new THREE.Sprite(
+                new THREE.SpriteMaterial({
+                    map: starHaloTexture,
+                    color: 0xffe4a8,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    opacity: 0.98
+                })
+            );
+            innerGlow.scale.set(3.2, 3.2, 1);
+            starGroup.add(innerGlow);
+
+            // Wide, gossamer corona aura around the tiny star
+            const outerCorona = new THREE.Sprite(
+                new THREE.SpriteMaterial({
+                    map: starHaloTexture,
+                    color: 0xff9a3c,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    opacity: 0.45
+                })
+            );
+            outerCorona.scale.set(9.5, 9.5, 1);
+            starGroup.add(outerCorona);
+
+            // --- 4. DISTANT BACKGROUND STARFIELD ---
+            const bgGeo = new THREE.BufferGeometry();
+            const bgPos = new Float32Array(CONFIG.bgStarCount * 3);
+            const bgCol = new Float32Array(CONFIG.bgStarCount * 3);
+
+            for (let i = 0; i < CONFIG.bgStarCount; i++) {
+                const i3 = i * 3;
+                const r = 36 + Math.random() * 64;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                bgPos[i3]     = r * Math.sin(phi) * Math.cos(theta);
+                bgPos[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+                bgPos[i3 + 2] = r * Math.cos(phi) - 18;
+
+                const lum = 0.45 + Math.random() * 0.45;
+                bgCol[i3]     = lum;
+                bgCol[i3 + 1] = lum * 0.94;
+                bgCol[i3 + 2] = lum * 0.98;
+            }
+            bgGeo.setAttribute('position', new THREE.BufferAttribute(bgPos, 3));
+            bgGeo.setAttribute('color', new THREE.BufferAttribute(bgCol, 3));
+
+            const bgStars = new THREE.Points(
+                bgGeo,
+                new THREE.PointsMaterial({
+                    size: 0.28,
+                    map: particleTexture,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.45,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                })
+            );
+            scene.add(bgStars);
+
+            // --- 5. CURVING SPIRAL & ORBITAL PARTICLE CLUSTER ---
+            const count = CONFIG.particleCount;
+            const geometry = new THREE.BufferGeometry();
+
+            const positions = new Float32Array(count * 3);
+            const colors = new Float32Array(count * 3);
+            const sizes = new Float32Array(count);
+            const sparklePhases = new Float32Array(count);
+
+            // Per-particle orbital & curved emergence attributes
+            const lifecycle = new Float32Array(count);      // 0.0 -> 1.0 slow journey from star into orbit
+            const lifeSpeed = new Float32Array(count);      // Very slow progression rate
+            const targetRadius = new Float32Array(count);   // Settled orbital radius around the star
+            const orbitalAngle = new Float32Array(count);   // Current angle around orbit
+            const angularSpeed = new Float32Array(count);   // Slow Keplerian orbital velocity
+            const spiralTwist = new Float32Array(count);    // Curvature of the outward emergence arc
+            const tiltX = new Float32Array(count);          // 3D orbital plane inclination X
+            const tiltZ = new Float32Array(count);          // 3D orbital plane inclination Z
+            const eccentricity = new Float32Array(count);   // Elliptical organic curve factor
+            const wavePhase = new Float32Array(count);      // Harmonic drift phase
+            const ribbonGroup = new Float32Array(count);    // Clusters particles into graceful curved streams
+
+            // Interaction displacement & velocity vectors
+            const dispX = new Float32Array(count);
+            const dispY = new Float32Array(count);
+            const dispZ = new Float32Array(count);
+            const velX = new Float32Array(count);
+            const velY = new Float32Array(count);
+            const velZ = new Float32Array(count);
+
+            const whitePalette = [
+                new THREE.Color(0xffffff), // Pure luminous white core
+                new THREE.Color(0xf4f8ff), // Crisp celestial ice-white
+                new THREE.Color(0xfffdf8)  // Subtle warm starlight white
+            ];
+
+            function initParticle(i, staggered = true) {
+                // Group ~75% of particles into 5 organic curved spiral arms/clusters, 25% free-floating
+                const inStream = Math.random() < 0.75;
+                const armIndex = Math.floor(Math.random() * 5);
+                const armBaseAngle = (armIndex / 5) * Math.PI * 2;
+
+                lifecycle[i] = staggered ? Math.random() : 0.0;
+                // Very slow, serene lifecycle (takes ~25 to 55 seconds to drift out, orbit, and fade)
+                lifeSpeed[i] = 0.00032 + Math.random() * 0.00042;
+
+                // Concentrate particles in a lush cosmic cluster around the star
+                const radialBias = Math.pow(Math.random(), 1.35);
+                targetRadius[i] = CONFIG.minOrbitRadius + radialBias * (CONFIG.maxOrbitRadius - CONFIG.minOrbitRadius);
+
+                orbitalAngle[i] = inStream
+                    ? armBaseAngle + (Math.random() - 0.5) * 0.85
+                    : Math.random() * Math.PI * 2;
+
+                // Inner particles orbit slightly faster than outer ones (gentle Keplerian swirl)
+                const normR = targetRadius[i] / CONFIG.maxOrbitRadius;
+                angularSpeed[i] = (0.0038 / (0.45 + normR)) * (0.75 + Math.random() * 0.5);
+
+                // Pronounced curved spiral arc as particles emerge from the pinpoint star
+                spiralTwist[i] = (2.2 + Math.random() * 2.4) * (inStream ? 1.0 : 0.65);
+
+                // Organic 3D tilted orbital planes so the cluster forms a rich volumetric cloud
+                const spread = inStream ? 0.52 : 1.15;
+                tiltX[i] = (Math.random() - 0.5) * spread;
+                tiltZ[i] = (Math.random() - 0.5) * spread;
+
+                eccentricity[i] = 0.82 + Math.random() * 0.32;
+                wavePhase[i] = Math.random() * Math.PI * 2;
+                ribbonGroup[i] = inStream ? 1.0 : 0.72;
+
+                dispX[i] = dispY[i] = dispZ[i] = 0;
+                velX[i] = velY[i] = velZ[i] = 0;
+
+                sizes[i] = (isMobile ? 0.44 : 0.38) * (0.45 + Math.random() * 1.15);
+                sparklePhases[i] = Math.random() * Math.PI * 2;
+            }
+
+            for (let i = 0; i < count; i++) {
+                initParticle(i, true);
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+            geometry.setAttribute('aSparklePhase', new THREE.BufferAttribute(sparklePhases, 1));
+
+            const particleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTexture: { value: particleTexture },
+                    uPixelRatio: { value: renderer.getPixelRatio() },
+                    uTime: { value: 0.0 }
+                },
+                vertexShader: `
+                    attribute float aSize;
+                    attribute float aSparklePhase;
+                    varying vec3 vColor;
+                    varying float vSparkle;
+                    uniform float uPixelRatio;
+                    uniform float uTime;
+
+                    void main() {
+                        vColor = color;
+                        // Smooth harmonic shimmer + occasional crisp diamond glint per particle
+                        float wave = sin(uTime * 3.8 + aSparklePhase);
+                        float glint = pow(max(0.0, sin(uTime * 2.1 + aSparklePhase * 1.7)), 12.0);
+                        vSparkle = 0.78 + 0.28 * wave + 1.15 * glint;
+
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_PointSize = aSize * (0.9 + 0.25 * glint) * uPixelRatio * (145.0 / -mvPosition.z);
+                        gl_PointSize = clamp(gl_PointSize, 1.2, 36.0);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D uTexture;
+                    varying vec3 vColor;
+                    varying float vSparkle;
+
+                    void main() {
+                        vec2 uv = gl_PointCoord - 0.5;
+                        float dist = length(uv);
+                        if (dist > 0.5) discard;
+
+                        vec4 texColor = texture2D(uTexture, gl_PointCoord);
+
+                        // Crisp 4-point starlight diffraction glint + intense white center core
+                        float crossFlare = exp(-abs(uv.x) * 28.0) * exp(-abs(uv.y) * 7.5)
+                                         + exp(-abs(uv.y) * 28.0) * exp(-abs(uv.x) * 7.5);
+                        float coreHotspot = exp(-dist * dist * 42.0);
+
+                        float luminance = (texColor.a + crossFlare * 0.42 + coreHotspot * 0.65) * vSparkle;
+                        vec3 finalColor = vColor * luminance * 1.25;
+
+                        gl_FragColor = vec4(finalColor, clamp(luminance, 0.0, 1.0));
+                    }
+                `,
+                transparent: true,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const particleSystem = new THREE.Points(geometry, particleMaterial);
+            scene.add(particleSystem);
+
+            // --- 6. ANDROID TOUCH & DESKTOP POINTER INTERACTION ---
+            const raycaster = new THREE.Raycaster();
+            const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+            function updatePointerFromClient(clientX, clientY) {
+                state.pointerNDC.x = (clientX / window.innerWidth) * 2 - 1;
+                state.pointerNDC.y = -(clientY / window.innerHeight) * 2 + 1;
+
+                raycaster.setFromCamera(state.pointerNDC, camera);
+                const hitPoint = new THREE.Vector3();
+                if (raycaster.ray.intersectPlane(interactionPlane, hitPoint)) {
+                    state.prevPointerWorld.copy(state.pointerWorld);
+                    state.pointerWorld.copy(hitPoint);
+
+                    if (state.pointerActive) {
+                        state.pointerVelocity.subVectors(state.pointerWorld, state.prevPointerWorld);
+                        state.pointerVelocity.clampLength(0, 0.85);
+                    } else {
+                        state.pointerVelocity.set(0, 0, 0);
+                    }
+                }
+            }
+
+            const domEl = renderer.domElement;
+
+            // Touch events for Android & iOS
+            domEl.addEventListener('touchstart', (e) => {
+                if (e.touches.length > 0) {
+                    const touch = e.touches[0];
+                    updatePointerFromClient(touch.clientX, touch.clientY);
+                    state.prevPointerWorld.copy(state.pointerWorld);
+                    state.pointerActive = true;
+                }
+            }, { passive: false });
+
+            domEl.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (e.touches.length > 0) {
+                    const touch = e.touches[0];
+                    updatePointerFromClient(touch.clientX, touch.clientY);
+                    state.pointerActive = true;
+                }
+            }, { passive: false });
+
+            function endPointer() {
+                state.pointerActive = false;
+                state.pointerVelocity.set(0, 0, 0);
+            }
+
+            domEl.addEventListener('touchend', endPointer, { passive: true });
+            domEl.addEventListener('touchcancel', endPointer, { passive: true });
+
+            // Mouse events for desktop browsers
+            domEl.addEventListener('mousemove', (e) => {
+                updatePointerFromClient(e.clientX, e.clientY);
+                state.pointerActive = true;
+            });
+
+            domEl.addEventListener('mousedown', (e) => {
+                updatePointerFromClient(e.clientX, e.clientY);
+                state.pointerActive = true;
+            });
+
+            domEl.addEventListener('mouseleave', endPointer);
+
+            // --- 7. RESPONSIVE RESIZE ---
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                updateCameraDistance();
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                particleMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+            });
+
+            // --- 8. SERENE 60FPS ANIMATION LOOP ---
+            const tempColor = new THREE.Color();
+
+            function animate() {
+                requestAnimationFrame(animate);
+
+                state.time += 0.016 * CONFIG.timeScale;
+                const t = state.time;
+                particleMaterial.uniforms.uTime.value = t * 2.6;
+
+                // Subtle, tranquil breathing of the tiny star's glow
+                const breathe = Math.sin(t * 2.4);
+                innerGlow.scale.set(3.2 + breathe * 0.18, 3.2 + breathe * 0.18, 1);
+                outerCorona.scale.set(9.5 - breathe * 0.35, 9.5 - breathe * 0.35, 1);
+
+                // Ultra-slow background star drift
+                bgStars.rotation.y = t * 0.015;
+
+                const posArr = geometry.attributes.position.array;
+                const colArr = geometry.attributes.color.array;
+
+                const px = state.pointerWorld.x;
+                const py = state.pointerWorld.y;
+                const pz = state.pointerWorld.z;
+                const vxSwipe = state.pointerVelocity.x;
+                const vySwipe = state.pointerVelocity.y;
+
+                const interactRad = CONFIG.interactionRadius;
+                const interactRadSq = interactRad * interactRad;
+
+                for (let i = 0; i < count; i++) {
+                    const i3 = i * 3;
+
+                    // 1. Slow progression along curved emergence -> sustained orbital phase
+                    lifecycle[i] += lifeSpeed[i];
+                    if (lifecycle[i] >= 1.0) {
+                        initParticle(i, false);
+                    }
+
+                    const life = lifecycle[i];
+
+                    // Smooth cubic ease-out curve from star center (0.05) to settled orbital radius
+                    // First 35% of life: graceful curved spiral outward from star
+                    // Remaining 65% of life: serene, lingering orbit around the star
+                    const emergeProgress = Math.min(1.0, life / 0.35);
+                    const easedOutward = 1.0 - Math.pow(1.0 - emergeProgress, 3.0);
+                    const r = 0.08 + easedOutward * targetRadius[i];
+
+                    // Advance slow orbital angle
+                    orbitalAngle[i] += angularSpeed[i];
+
+                    // Curving spiral angle: winds tightly near the star and opens into a smooth ellipse
+                    const spiralCurve = (1.0 - easedOutward) * spiralTwist[i];
+                    const harmonicWave = Math.sin(t * 1.4 + wavePhase[i] + r * 0.35) * 0.14;
+                    const theta = orbitalAngle[i] - spiralCurve + harmonicWave;
+
+                    // Base elliptical position in orbital plane
+                    const ox = r * Math.cos(theta) * eccentricity[i];
+                    const oy = r * Math.sin(theta);
+                    const oz = Math.sin(theta * 2.0 + wavePhase[i]) * 0.45 * easedOutward;
+
+                    // Rotate orbital plane in 3D using precomputed tilt angles for volumetric clutter
+                    const tx = tiltX[i];
+                    const tz = tiltZ[i];
+                    const cosX = Math.cos(tx), sinX = Math.sin(tx);
+                    const cosZ = Math.cos(tz), sinZ = Math.sin(tz);
+
+                    // Apply Z-tilt then X-tilt
+                    const rx = ox * cosZ - oy * sinZ;
+                    const ry1 = ox * sinZ + oy * cosZ;
+                    const homeX = rx;
+                    const homeY = ry1 * cosX - oz * sinX;
+                    const homeZ = ry1 * sinX + oz * cosX;
+
+                    const curX = homeX + dispX[i];
+                    const curY = homeY + dispY[i];
+                    const curZ = homeZ + dispZ[i];
+
+                    // 2. Gentle Touch / Pointer Dispersion & Swirl
+                    if (state.pointerActive) {
+                        const dx = curX - px;
+                        const dy = curY - py;
+                        const dz = (curZ - pz) * 0.4;
+                        const distSq = dx * dx + dy * dy + dz * dz;
+
+                        if (distSq < interactRadSq && distSq > 0.0001) {
+                            const dist = Math.sqrt(distSq);
+                            const falloff = Math.pow(1.0 - dist / interactRad, 2.0);
+                            const invDist = 1.0 / dist;
+                            const nx = dx * invDist;
+                            const ny = dy * invDist;
+                            const nz = dz * invDist;
+
+                            // Soft outward dispersion + delicate vortex swirl + drag wake
+                            const pushForce = 0.095 * falloff;
+                            const swirlForce = 0.065 * falloff;
+
+                            velX[i] += nx * pushForce - ny * swirlForce + vxSwipe * falloff * 0.22;
+                            velY[i] += ny * pushForce + nx * swirlForce + vySwipe * falloff * 0.22;
+                            velZ[i] += nz * pushForce * 0.65;
+                        }
+                    }
+
+                    // 3. Soft Spring Return back into curving orbital path
+                    velX[i] += -dispX[i] * CONFIG.springStiffness;
+                    velY[i] += -dispY[i] * CONFIG.springStiffness;
+                    velZ[i] += -dispZ[i] * CONFIG.springStiffness;
+
+                    velX[i] *= CONFIG.damping;
+                    velY[i] *= CONFIG.damping;
+                    velZ[i] *= CONFIG.damping;
+
+                    dispX[i] += velX[i];
+                    dispY[i] += velY[i];
+                    dispZ[i] += velZ[i];
+
+                    posArr[i3]     = homeX + dispX[i];
+                    posArr[i3 + 1] = homeY + dispY[i];
+                    posArr[i3 + 2] = homeZ + dispZ[i];
+
+                    // 4. Crisp Pure White Starlight & Smooth Fade Envelope
+                    const radialNorm = Math.min(1.0, r / CONFIG.maxOrbitRadius);
+                    const agitation = Math.min(1.0, (Math.abs(velX[i]) + Math.abs(velY[i])) * 4.5);
+                    const tintFactor = Math.max(0.0, Math.min(1.0, radialNorm));
+
+                    if (agitation > 0.15) {
+                        tempColor.copy(whitePalette[0]);
+                    } else {
+                        tempColor.lerpColors(whitePalette[2], whitePalette[1], tintFactor);
+                    }
+
+                    // Fade in smoothly from the pinpoint star and fade out gently at end of orbit
+                    const fadeIn = Math.min(1.0, life / 0.08);
+                    const fadeOut = Math.min(1.0, (1.0 - life) / 0.18);
+                    const twinkle = 0.85 + 0.15 * Math.sin(t * 3.2 + wavePhase[i]);
+                    const brightness = fadeIn * fadeOut * twinkle * ribbonGroup[i] + agitation * 0.35;
+
+                    colArr[i3]     = tempColor.r * brightness;
+                    colArr[i3 + 1] = tempColor.g * brightness;
+                    colArr[i3 + 2] = tempColor.b * brightness;
+                }
+
+                geometry.attributes.position.needsUpdate = true;
+                geometry.attributes.color.needsUpdate = true;
+
+                state.pointerVelocity.multiplyScalar(0.78);
+
+                renderer.render(scene, camera);
+            }
+
+            animate();
+        };
+    </script>
+</body>
+</html>
